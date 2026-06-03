@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="GPQ.Client/GPQ.Client.csproj" />
+  <Project Path="GPQ/GPQ.csproj" />
+</Solution>
