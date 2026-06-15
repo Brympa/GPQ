@@ -1,7 +1,1017 @@
-﻿@page "/"
+@page "/"
+@using GPQ.Client.Models
+@using System.Text.Json
+@inject HttpClient Http
+@inject IJSRuntime JS
 
-<PageTitle>Home</PageTitle>
+<PageTitle>GPQ - тестирования API</PageTitle>
 
-<h1>Hello, world!</h1>
+@if (_activeMenuRequestId.HasValue || _isMethodMenuOpen)
+{
+    <div class="menu-overlay" @onclick="CloseAllMenus"></div>
+}
 
-Welcome to your new app.
+<div class="workspace-sidebar">
+    <div class="sidebar-header">
+        <div class="brand">GPQ</div>
+        <div class="sidebar-actions">
+            <button class="btn-cyber-outline" @onclick="ManualSave" title="Сохранить">
+                @if (_isSavedIndicatorActive)
+                {
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2FAD66" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                }
+                else
+                {
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+                }
+            </button>
+            <button class="btn-cyber-outline" @onclick="AddNewRequest">+ ЗАПРОС</button>
+        </div>
+    </div>
+    
+    <div class="request-tree">
+        @if (_requests == null || _requests.Count == 0)
+        {
+            <div class="text-center text-muted mt-4">
+                <em>Нет запросов в рабочей области</em>
+            </div>
+        }
+        else
+        {
+            @foreach (var req in _requests)
+            {
+                var isSelected = req.Id == _activeRequestId;
+                var methodClass = req.Method.ToLowerInvariant();
+                
+                <div class="request-item @(isSelected ? "active" : "")" 
+                     @onclick="() => SelectRequest(req.Id)">
+                    <div class="request-meta">
+                        <span class="method-badge @methodClass">@req.Method</span>
+                        
+                        @if (_editingRequestId == req.Id)
+                        {
+                            <input class="request-name-input" 
+                                   value="@req.Name" 
+                                   @oninput="(e) => OnRequestNameInput(req, e)"
+                                   @onblur="StopEditing" 
+                                   @onkeydown="(e) => OnRequestNameKeyDown(e)"
+                                   id="input-@req.Id" 
+                                   @onclick:stopPropagation />
+                        }
+                        else
+                        {
+                            <span class="request-name-text" 
+                                  @ondblclick="() => StartEditing(req.Id)">@req.Name</span>
+                        }
+                    </div>
+                    
+                    <div class="request-item-actions" @onclick:stopPropagation>
+                        <button class="btn-item-menu" @onclick="() => ToggleMenu(req.Id)">⋮</button>
+                        
+                        @if (_activeMenuRequestId == req.Id)
+                        {
+                            <div class="request-menu-dropdown">
+                                <button class="request-menu-item" @onclick="() => TriggerRename(req.Id)">Переименовать</button>
+                                <button class="request-menu-item delete" @onclick="() => TriggerDelete(req.Id)">Удалить</button>
+                            </div>
+                        }
+                    </div>
+                </div>
+            }
+        }
+    </div>
+</div>
+
+<div class="main-deck">
+    @if (ActiveRequest != null)
+    {
+        <div class="address-bar-container">
+            <div class="custom-method-dropdown-container">
+                <button class="method-badge @ActiveRequest.Method.ToLowerInvariant()" @onclick="ToggleMethodMenu" @onclick:stopPropagation>
+                    @ActiveRequest.Method
+                </button>
+                @if (_isMethodMenuOpen)
+                {
+                    <div class="method-menu-options" @onclick:stopPropagation>
+                        @foreach (var m in _supportedMethods)
+                        {
+                            <button class="method-badge @m.ToLowerInvariant()" @onclick="() => SelectMethod(m)">
+                                @m
+                            </button>
+                        }
+                    </div>
+                }
+            </div>
+            
+            <div class="url-input-wrapper">
+                <input class="url-input" 
+                       type="text" 
+                       placeholder="Введите URL-адрес запроса (например, https://httpbin.org/get)" 
+                       @bind-value="ActiveRequest.Url" 
+                       @bind-value:event="oninput"
+                       @onkeyup="OnUrlKeyUp" />
+            </div>
+            
+            <button class="btn-send" @onclick="SendRequest" disabled="@_isSending">
+                @if (_isSending)
+                {
+                    <span>Отправка...</span>
+                }
+                else
+                {
+                    <span>SEND</span>
+                }
+            </button>
+        </div>
+        
+        <div class="tabs-row">
+            <button class="tab-btn @(_activeTab == "params" ? "active" : "")" 
+                    @onclick='() => _activeTab = "params"'>Params</button>
+            <button class="tab-btn @(_activeTab == "headers" ? "active" : "")" 
+                    @onclick='() => _activeTab = "headers"'>Headers</button>
+            <button class="tab-btn @(_activeTab == "body" ? "active" : "")" 
+                    @onclick='() => _activeTab = "body"'>Body</button>
+        </div>
+        
+        <div class="tab-content">
+            @if (_activeTab == "params")
+            {
+                <table class="cyber-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 40px;"></th>
+                            <th>KEY</th>
+                            <th>VALUE</th>
+                            <th style="width: 50px;"></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @for (int i = 0; i < ActiveRequest.Params.Count; i++)
+                        {
+                            var index = i;
+                            var param = ActiveRequest.Params[index];
+                            <tr>
+                                <td class="text-center">
+                                    <input type="checkbox" 
+                                           class="checkbox-cyber" 
+                                           @bind="param.IsEnabled" 
+                                           @bind:after="OnParamChanged" />
+                                </td>
+                                <td>
+                                    <input class="cyber-input" 
+                                           placeholder="Key" 
+                                           @bind="param.Key" 
+                                           @bind:event="oninput"
+                                           @bind:after="OnParamChanged" />
+                                </td>
+                                <td>
+                                    <input class="cyber-input" 
+                                           placeholder="Value" 
+                                           @bind="param.Value" 
+                                           @bind:event="oninput"
+                                           @bind:after="OnParamChanged" />
+                                </td>
+                                <td class="text-center">
+                                    @if (index < ActiveRequest.Params.Count - 1)
+                                    {
+                                        <button class="btn-delete-row" @onclick="() => RemoveParamRow(index)">×</button>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+            else if (_activeTab == "headers")
+            {
+                <table class="cyber-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 40px;"></th>
+                            <th>KEY</th>
+                            <th>VALUE</th>
+                            <th style="width: 50px;"></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @for (int i = 0; i < ActiveRequest.Headers.Count; i++)
+                        {
+                            var index = i;
+                            var header = ActiveRequest.Headers[index];
+                            <tr>
+                                <td class="text-center">
+                                    <input type="checkbox" 
+                                           class="checkbox-cyber" 
+                                           @bind="header.IsEnabled" 
+                                           @bind:after="OnHeaderChanged" />
+                                </td>
+                                <td>
+                                    <input class="cyber-input" 
+                                           placeholder="Key" 
+                                           @bind="header.Key" 
+                                           @bind:event="oninput"
+                                           @bind:after="OnHeaderChanged" />
+                                </td>
+                                <td>
+                                    <input class="cyber-input" 
+                                           placeholder="Value" 
+                                           @bind="header.Value" 
+                                           @bind:event="oninput"
+                                           @bind:after="OnHeaderChanged" />
+                                </td>
+                                <td class="text-center">
+                                    @if (index < ActiveRequest.Headers.Count - 1)
+                                    {
+                                        <button class="btn-delete-row" @onclick="() => RemoveHeaderRow(index)">×</button>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+            else if (_activeTab == "body")
+            {
+                <div class="body-editor-container">
+                    <div class="body-mode-selector">
+                        <label class="body-radio-label @(ActiveRequest.BodyMode == "none" ? "active" : "")">
+                            <input type="radio" name="bodyMode" value="none" 
+                                   checked="@(ActiveRequest.BodyMode == "none")" 
+                                   @onchange='() => SetBodyMode("none")' />
+                            Нет
+                        </label>
+                        <label class="body-radio-label @(ActiveRequest.BodyMode == "form-data" ? "active" : "")">
+                            <input type="radio" name="bodyMode" value="form-data" 
+                                   checked="@(ActiveRequest.BodyMode == "form-data")" 
+                                   @onchange='() => SetBodyMode("form-data")' />
+                            form-data
+                        </label>
+                        <label class="body-radio-label @(ActiveRequest.BodyMode == "urlencoded" ? "active" : "")">
+                            <input type="radio" name="bodyMode" value="urlencoded" 
+                                   checked="@(ActiveRequest.BodyMode == "urlencoded")" 
+                                   @onchange='() => SetBodyMode("urlencoded")' />
+                            x-www-form-urlencoded
+                        </label>
+                    </div>
+
+                    @if (ActiveRequest.BodyMode == "none")
+                    {
+                        <div class="body-empty-msg">
+                            Тело запроса отсутствует
+                        </div>
+                    }
+                    else if (ActiveRequest.BodyMode == "form-data")
+                    {
+                        <table class="cyber-table">
+                            <thead>
+                                <tr>
+                                    <th style="width: 40px;"></th>
+                                    <th>KEY</th>
+                                    <th>VALUE</th>
+                                    <th style="width: 50px;"></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @for (int i = 0; i < ActiveRequest.FormData.Count; i++)
+                                {
+                                    var index = i;
+                                    var param = ActiveRequest.FormData[index];
+                                    <tr>
+                                        <td class="text-center">
+                                            <input type="checkbox" 
+                                                   class="checkbox-cyber" 
+                                                   @bind="param.IsEnabled" 
+                                                   @bind:after="OnFormDataChanged" />
+                                        </td>
+                                        <td>
+                                            <input class="cyber-input" 
+                                                   placeholder="Key" 
+                                                   @bind="param.Key" 
+                                                   @bind:event="oninput"
+                                                   @bind:after="OnFormDataChanged" />
+                                        </td>
+                                        <td>
+                                            <input class="cyber-input" 
+                                                   placeholder="Value" 
+                                                   @bind="param.Value" 
+                                                   @bind:event="oninput"
+                                                   @bind:after="OnFormDataChanged" />
+                                        </td>
+                                        <td class="text-center">
+                                            @if (index < ActiveRequest.FormData.Count - 1)
+                                            {
+                                                <button class="btn-delete-row" @onclick="() => RemoveFormDataRow(index)">×</button>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    }
+                    else if (ActiveRequest.BodyMode == "urlencoded")
+                    {
+                        <table class="cyber-table">
+                            <thead>
+                                <tr>
+                                    <th style="width: 40px;"></th>
+                                    <th>KEY</th>
+                                    <th>VALUE</th>
+                                    <th style="width: 50px;"></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @for (int i = 0; i < ActiveRequest.UrlEncodedData.Count; i++)
+                                {
+                                    var index = i;
+                                    var param = ActiveRequest.UrlEncodedData[index];
+                                    <tr>
+                                        <td class="text-center">
+                                            <input type="checkbox" 
+                                                   class="checkbox-cyber" 
+                                                   @bind="param.IsEnabled" 
+                                                   @bind:after="OnUrlEncodedChanged" />
+                                        </td>
+                                        <td>
+                                            <input class="cyber-input" 
+                                                   placeholder="Key" 
+                                                   @bind="param.Key" 
+                                                   @bind:event="oninput"
+                                                   @bind:after="OnUrlEncodedChanged" />
+                                        </td>
+                                        <td>
+                                            <input class="cyber-input" 
+                                                   placeholder="Value" 
+                                                   @bind="param.Value" 
+                                                   @bind:event="oninput"
+                                                   @bind:after="OnUrlEncodedChanged" />
+                                        </td>
+                                        <td class="text-center">
+                                            @if (index < ActiveRequest.UrlEncodedData.Count - 1)
+                                            {
+                                                <button class="btn-delete-row" @onclick="() => RemoveUrlEncodedRow(index)">×</button>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    }
+                </div>
+            }
+        </div>
+        
+        <div class="response-container">
+            <div class="response-header">
+                <span class="response-title">ОТВЕТ (RESPONSE)</span>
+                
+                @if (_response != null)
+                {
+                    var isSuccess = _response.StatusCode >= 200 && _response.StatusCode < 300;
+                    var isError = _response.StatusCode == 0 || _response.StatusCode >= 400;
+                    var statusClass = isSuccess ? "status-success" : (isError ? "status-error" : "status-warning");
+                    
+                    <div class="response-metadata">
+                        <div class="meta-item">
+                            <span class="meta-label">Статус:</span>
+                            <span class="meta-value @statusClass">
+                                @(_response.StatusCode == 0 ? "Error" : $"{_response.StatusCode} {_response.StatusDescription}")
+                            </span>
+                        </div>
+                        <div class="meta-item">
+                            <span class="meta-label">Время:</span>
+                            <span class="meta-value text-muted">@_response.ElapsedTimeMs ms</span>
+                        </div>
+                        <div class="meta-item">
+                            <span class="meta-label">Размер:</span>
+                            <span class="meta-value text-muted">@FormatBytes(_response.SizeInBytes)</span>
+                        </div>
+                    </div>
+                }
+            </div>
+            
+            <div class="response-body">
+                @if (_isSending)
+                {
+                    <div class="empty-response">
+                        <div>Ожидание ответа от сервера...</div>
+                    </div>
+                }
+                else if (_response != null)
+                {
+                    @if (!string.IsNullOrEmpty(_response.ErrorMessage))
+                    {
+                        <div class="text-danger font-monospace">
+                            Ошибка: @_response.ErrorMessage
+                        </div>
+                    }
+                    else if (string.IsNullOrEmpty(_response.Body))
+                    {
+                        <div class="text-muted font-monospace italic">
+                            Тело ответа пусто
+                        </div>
+                    }
+                    else
+                    {
+                        <pre class="json-output"><code>@_prettyResponse</code></pre>
+                    }
+                }
+                else
+                {
+                    <div class="empty-response">
+                        <div>Введите URL-адрес запроса и нажмите SEND для тестирования.</div>
+                    </div>
+                }
+            </div>
+        </div>
+    }
+    else
+    {
+        <div class="empty-response">
+            <h2>Добро пожаловать в консоль GPQ API</h2>
+            <p>Создайте запрос в левой панели, чтобы начать.</p>
+        </div>
+    }
+</div>
+
+@code {
+    private List<RequestModel> _requests = new();
+    private Guid? _activeRequestId;
+    private Guid? _editingRequestId;
+    private Guid? _activeMenuRequestId;
+    private string _activeTab = "params";
+    
+    private readonly string[] _supportedMethods = { "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD" };
+    private bool _isMethodMenuOpen = false;
+    private bool _isSavedIndicatorActive = false;
+
+    private ProxyResponse? _response;
+    private string _prettyResponse = string.Empty;
+    private bool _isSending = false;
+    private bool _isSyncing = false;
+
+    private RequestModel? ActiveRequest => _requests.FirstOrDefault(r => r.Id == _activeRequestId);
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await LoadWorkspace();
+            StateHasChanged();
+        }
+    }
+
+    private void ToggleMethodMenu()
+    {
+        _isMethodMenuOpen = !_isMethodMenuOpen;
+    }
+
+    private void SelectMethod(string method)
+    {
+        if (ActiveRequest == null) return;
+        ActiveRequest.Method = method;
+        _isMethodMenuOpen = false;
+        
+        EnsureEmptyHeaderRow();
+        _ = SaveWorkspace();
+    }
+
+    private void ToggleMenu(Guid id)
+    {
+        _activeMenuRequestId = _activeMenuRequestId == id ? null : id;
+    }
+
+    private void CloseAllMenus()
+    {
+        _activeMenuRequestId = null;
+        _isMethodMenuOpen = false;
+    }
+
+    private void TriggerRename(Guid id)
+    {
+        _activeMenuRequestId = null;
+        StartEditing(id);
+    }
+
+    private void TriggerDelete(Guid id)
+    {
+        _activeMenuRequestId = null;
+        DeleteRequest(id);
+    }
+
+    private void SelectRequest(Guid id)
+    {
+        if (_activeRequestId == id) return;
+        
+        _activeRequestId = id;
+        _response = null;
+        _prettyResponse = string.Empty;
+        _activeTab = "params";
+        
+        EnsureEmptyParamRow();
+        EnsureEmptyHeaderRow();
+        EnsureEmptyFormDataRow();
+        EnsureEmptyUrlEncodedRow();
+        _ = SaveWorkspace();
+    }
+
+    private void AddNewRequest()
+    {
+        var req = new RequestModel
+        {
+            Name = "Новый запрос",
+            Method = "GET",
+            Url = "https://httpbin.org/get",
+            Params = new List<KeyValuePairModel>(),
+            Headers = new List<KeyValuePairModel> {
+                new KeyValuePairModel { Key = "Accept", Value = "application/json", IsEnabled = true }
+            },
+            BodyMode = "none",
+            FormData = new List<KeyValuePairModel>(),
+            UrlEncodedData = new List<KeyValuePairModel>(),
+            Body = ""
+        };
+        
+        _requests.Add(req);
+        _activeRequestId = req.Id;
+        
+        EnsureEmptyParamRow();
+        EnsureEmptyHeaderRow();
+        EnsureEmptyFormDataRow();
+        EnsureEmptyUrlEncodedRow();
+        _ = SaveWorkspace();
+    }
+
+    private void DeleteRequest(Guid id)
+    {
+        var reqIndex = _requests.FindIndex(r => r.Id == id);
+        if (reqIndex >= 0)
+        {
+            _requests.RemoveAt(reqIndex);
+            
+            if (_activeRequestId == id)
+            {
+                _activeRequestId = _requests.Count > 0 ? _requests[0].Id : null;
+                _response = null;
+                _prettyResponse = string.Empty;
+            }
+            
+            _ = SaveWorkspace();
+        }
+    }
+
+    private void StartEditing(Guid id)
+    {
+        _editingRequestId = id;
+        Task.Run(async () => {
+            await Task.Delay(50);
+            try
+            {
+                await JS.InvokeVoidAsync("eval", $"document.getElementById('input-{id}')?.focus()");
+                await JS.InvokeVoidAsync("eval", $"document.getElementById('input-{id}')?.select()");
+            }
+            catch {}
+        });
+    }
+
+    private void StopEditing()
+    {
+        _editingRequestId = null;
+        _ = SaveWorkspace();
+    }
+
+    private void OnRequestNameInput(RequestModel req, ChangeEventArgs e)
+    {
+        var newName = e.Value?.ToString();
+        req.Name = string.IsNullOrWhiteSpace(newName) ? "Новый запрос" : newName;
+    }
+
+    private void OnRequestNameKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" || e.Key == "Escape")
+        {
+            StopEditing();
+        }
+    }
+
+    private void OnMethodChanged(ChangeEventArgs e)
+    {
+        if (ActiveRequest == null) return;
+        var newMethod = e.Value?.ToString() ?? "GET";
+        ActiveRequest.Method = newMethod;
+        
+        EnsureEmptyHeaderRow();
+        _ = SaveWorkspace();
+    }
+
+    private void OnUrlKeyUp(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            _ = SendRequest();
+        }
+        else
+        {
+            SyncUrlToParams();
+        }
+    }
+
+    private void OnParamChanged()
+    {
+        EnsureEmptyParamRow();
+        SyncParamsToUrl();
+    }
+
+    private void OnHeaderChanged()
+    {
+        EnsureEmptyHeaderRow();
+        _ = SaveWorkspace();
+    }
+
+    private void OnFormDataChanged()
+    {
+        EnsureEmptyFormDataRow();
+        _ = SaveWorkspace();
+    }
+
+    private void OnUrlEncodedChanged()
+    {
+        EnsureEmptyUrlEncodedRow();
+        _ = SaveWorkspace();
+    }
+
+    private void SetBodyMode(string mode)
+    {
+        if (ActiveRequest == null) return;
+        ActiveRequest.BodyMode = mode;
+        EnsureEmptyFormDataRow();
+        EnsureEmptyUrlEncodedRow();
+        _ = SaveWorkspace();
+    }
+
+    private void RemoveParamRow(int index)
+    {
+        if (ActiveRequest == null) return;
+        ActiveRequest.Params.RemoveAt(index);
+        SyncParamsToUrl();
+    }
+
+    private void RemoveHeaderRow(int index)
+    {
+        if (ActiveRequest == null) return;
+        ActiveRequest.Headers.RemoveAt(index);
+        _ = SaveWorkspace();
+    }
+
+    private void RemoveFormDataRow(int index)
+    {
+        if (ActiveRequest == null) return;
+        ActiveRequest.FormData.RemoveAt(index);
+        _ = SaveWorkspace();
+    }
+
+    private void RemoveUrlEncodedRow(int index)
+    {
+        if (ActiveRequest == null) return;
+        ActiveRequest.UrlEncodedData.RemoveAt(index);
+        _ = SaveWorkspace();
+    }
+
+    private void EnsureEmptyParamRow()
+    {
+        if (ActiveRequest == null) return;
+        if (ActiveRequest.Params.Count == 0 || 
+            !string.IsNullOrEmpty(ActiveRequest.Params[^1].Key) || 
+            !string.IsNullOrEmpty(ActiveRequest.Params[^1].Value))
+        {
+            ActiveRequest.Params.Add(new KeyValuePairModel { Key = "", Value = "", IsEnabled = true });
+        }
+    }
+
+    private void EnsureEmptyHeaderRow()
+    {
+        if (ActiveRequest == null) return;
+        if (ActiveRequest.Headers.Count == 0 || 
+            !string.IsNullOrEmpty(ActiveRequest.Headers[^1].Key) || 
+            !string.IsNullOrEmpty(ActiveRequest.Headers[^1].Value))
+        {
+            ActiveRequest.Headers.Add(new KeyValuePairModel { Key = "", Value = "", IsEnabled = true });
+        }
+    }
+
+    private void EnsureEmptyFormDataRow()
+    {
+        if (ActiveRequest == null) return;
+        if (ActiveRequest.FormData.Count == 0 || 
+            !string.IsNullOrEmpty(ActiveRequest.FormData[^1].Key) || 
+            !string.IsNullOrEmpty(ActiveRequest.FormData[^1].Value))
+        {
+            ActiveRequest.FormData.Add(new KeyValuePairModel { Key = "", Value = "", IsEnabled = true });
+        }
+    }
+
+    private void EnsureEmptyUrlEncodedRow()
+    {
+        if (ActiveRequest == null) return;
+        if (ActiveRequest.UrlEncodedData.Count == 0 || 
+            !string.IsNullOrEmpty(ActiveRequest.UrlEncodedData[^1].Key) || 
+            !string.IsNullOrEmpty(ActiveRequest.UrlEncodedData[^1].Value))
+        {
+            ActiveRequest.UrlEncodedData.Add(new KeyValuePairModel { Key = "", Value = "", IsEnabled = true });
+        }
+    }
+
+    private void SyncParamsToUrl()
+    {
+        if (_isSyncing || ActiveRequest == null) return;
+        _isSyncing = true;
+        try
+        {
+            var url = ActiveRequest.Url;
+            var queryStartIndex = url.IndexOf('?');
+            var baseUrl = queryStartIndex >= 0 ? url.Substring(0, queryStartIndex) : url;
+
+            var activeParams = ActiveRequest.Params
+                .Where(p => p.IsEnabled && !string.IsNullOrWhiteSpace(p.Key))
+                .Select(p => $"{Uri.EscapeDataString(p.Key)}={Uri.EscapeDataString(p.Value)}");
+
+            var queryString = string.Join("&", activeParams);
+            ActiveRequest.Url = string.IsNullOrEmpty(queryString) ? baseUrl : $"{baseUrl}?{queryString}";
+        }
+        catch { }
+        finally
+        {
+            _isSyncing = false;
+            _ = SaveWorkspace();
+        }
+    }
+
+    private void SyncUrlToParams()
+    {
+        if (_isSyncing || ActiveRequest == null) return;
+        _isSyncing = true;
+        try
+        {
+            var url = ActiveRequest.Url;
+            var queryStartIndex = url.IndexOf('?');
+            if (queryStartIndex < 0)
+            {
+                ActiveRequest.Params.RemoveAll(p => p.IsEnabled);
+                EnsureEmptyParamRow();
+                return;
+            }
+
+            var queryString = url.Substring(queryStartIndex + 1);
+            var parts = queryString.Split('&', StringSplitOptions.RemoveEmptyEntries);
+
+            var disabledParams = ActiveRequest.Params.Where(p => !p.IsEnabled).ToList();
+            var newParams = new List<KeyValuePairModel>();
+
+            foreach (var part in parts)
+            {
+                var kv = part.Split('=', 2);
+                if (kv.Length == 0) continue;
+                var key = Uri.UnescapeDataString(kv[0]);
+                var val = kv.Length > 1 ? Uri.UnescapeDataString(kv[1]) : "";
+                newParams.Add(new KeyValuePairModel { Key = key, Value = val, IsEnabled = true });
+            }
+
+            ActiveRequest.Params = newParams.Concat(disabledParams).ToList();
+            EnsureEmptyParamRow();
+        }
+        catch { }
+        finally
+        {
+            _isSyncing = false;
+            _ = SaveWorkspace();
+        }
+    }
+
+    private async Task ManualSave()
+    {
+        await SaveWorkspace();
+        _isSavedIndicatorActive = true;
+        StateHasChanged();
+        await Task.Delay(1500);
+        _isSavedIndicatorActive = false;
+        StateHasChanged();
+    }
+
+    private async Task SendRequest()
+    {
+        if (ActiveRequest == null || _isSending) return;
+        
+        _isSending = true;
+        _response = null;
+        _prettyResponse = string.Empty;
+        
+        try
+        {
+            var proxyReq = new ProxyRequest
+            {
+                Method = ActiveRequest.Method,
+                Url = ActiveRequest.Url,
+                Body = ActiveRequest.Body,
+                BodyMode = ActiveRequest.BodyMode,
+                FormData = ActiveRequest.FormData.Where(f => f.IsEnabled && !string.IsNullOrWhiteSpace(f.Key)).ToList(),
+                UrlEncodedData = ActiveRequest.UrlEncodedData.Where(u => u.IsEnabled && !string.IsNullOrWhiteSpace(u.Key)).ToList(),
+                Headers = ActiveRequest.Headers.Where(h => h.IsEnabled && !string.IsNullOrWhiteSpace(h.Key)).ToList()
+            };
+            
+            var apiResponse = await Http.PostAsJsonAsync("/api/proxy", proxyReq);
+            if (apiResponse.IsSuccessStatusCode)
+            {
+                _response = await apiResponse.Content.ReadFromJsonAsync<ProxyResponse>();
+                
+                if (_response != null && !string.IsNullOrEmpty(_response.Body))
+                {
+                    _prettyResponse = PrettyPrintJson(_response.Body);
+                }
+            }
+            else
+            {
+                _response = new ProxyResponse
+                {
+                    StatusCode = (int)apiResponse.StatusCode,
+                    StatusDescription = apiResponse.ReasonPhrase ?? "API Connection Error",
+                    ErrorMessage = $"Proxy server returned {apiResponse.StatusCode}: {apiResponse.ReasonPhrase}"
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            _response = new ProxyResponse
+            {
+                StatusCode = 0,
+                StatusDescription = "Failure",
+                ErrorMessage = $"Failed to execute proxy: {ex.Message}"
+            };
+        }
+        _isSending = false;
+    }
+
+    private string PrettyPrintJson(string rawJson)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(rawJson);
+            return JsonSerializer.Serialize(doc, new JsonSerializerOptions 
+            { 
+                WriteIndented = true,
+                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.Create(System.Text.Unicode.UnicodeRanges.All)
+            });
+        }
+        catch
+        {
+            return rawJson;
+        }
+    }
+
+    private string FormatBytes(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F2} KB";
+        return $"{bytes / (1024.0 * 1024.0):F2} MB";
+    }
+
+    private async Task SaveWorkspace()
+    {
+        try
+        {
+            var requestsJson = JsonSerializer.Serialize(_requests);
+            await JS.InvokeVoidAsync("localStorage.setItem", "gpq_workspace_requests_v3", requestsJson);
+            if (_activeRequestId.HasValue)
+            {
+                await JS.InvokeVoidAsync("localStorage.setItem", "gpq_active_request_id_v3", _activeRequestId.Value.ToString());
+            }
+            else
+            {
+                await JS.InvokeVoidAsync("localStorage.removeItem", "gpq_active_request_id_v3");
+            }
+        }
+        catch {}
+    }
+
+    private async Task LoadWorkspace()
+    {
+        try
+        {
+            var requestsJson = await JS.InvokeAsync<string?>("localStorage.getItem", "gpq_workspace_requests_v3");
+            if (!string.IsNullOrEmpty(requestsJson))
+            {
+                var loaded = JsonSerializer.Deserialize<List<RequestModel>>(requestsJson);
+                if (loaded != null && loaded.Count > 0)
+                {
+                    _requests = loaded;
+                    foreach (var req in _requests)
+                    {
+                        EnsureAllListsCreated(req);
+                    }
+
+                    var activeIdStr = await JS.InvokeAsync<string?>("localStorage.getItem", "gpq_active_request_id_v3");
+                    if (Guid.TryParse(activeIdStr, out var actId) && _requests.Any(r => r.Id == actId))
+                    {
+                        _activeRequestId = actId;
+                    }
+                    else
+                    {
+                        _activeRequestId = _requests[0].Id;
+                    }
+                }
+            }
+        }
+        catch {}
+
+        if (_requests.Count == 0)
+        {
+            PreloadDefaultWorkspace();
+        }
+
+        EnsureEmptyParamRow();
+        EnsureEmptyHeaderRow();
+        EnsureEmptyFormDataRow();
+        EnsureEmptyUrlEncodedRow();
+    }
+
+    private void EnsureAllListsCreated(RequestModel req)
+    {
+        if (req.Params == null) req.Params = new();
+        if (req.Headers == null) req.Headers = new();
+        if (req.FormData == null) req.FormData = new();
+        if (req.UrlEncodedData == null) req.UrlEncodedData = new();
+        if (string.IsNullOrEmpty(req.BodyMode)) req.BodyMode = "none";
+    }
+
+    private void PreloadDefaultWorkspace()
+    {
+        _requests = new List<RequestModel>
+        {
+            new RequestModel
+            {
+                Id = Guid.NewGuid(),
+                Name = "Список пользователей (GET)",
+                Method = "GET",
+                Url = "https://reqres.in/api/users?page=2",
+                Params = new List<KeyValuePairModel> {
+                    new KeyValuePairModel { Key = "page", Value = "2", IsEnabled = true }
+                },
+                Headers = new List<KeyValuePairModel> {
+                    new KeyValuePairModel { Key = "Accept", Value = "application/json", IsEnabled = true }
+                },
+                BodyMode = "none",
+                FormData = new List<KeyValuePairModel>(),
+                UrlEncodedData = new List<KeyValuePairModel>(),
+                Body = ""
+            },
+            new RequestModel
+            {
+                Id = Guid.NewGuid(),
+                Name = "Создать пользователя (POST)",
+                Method = "POST",
+                Url = "https://reqres.in/api/users",
+                Params = new List<KeyValuePairModel>(),
+                Headers = new List<KeyValuePairModel> {
+                    new KeyValuePairModel { Key = "Accept", Value = "application/json", IsEnabled = true }
+                },
+                BodyMode = "form-data",
+                FormData = new List<KeyValuePairModel> {
+                    new KeyValuePairModel { Key = "name", Value = "morpheus", IsEnabled = true },
+                    new KeyValuePairModel { Key = "job", Value = "leader", IsEnabled = true }
+                },
+                UrlEncodedData = new List<KeyValuePairModel>(),
+                Body = ""
+            },
+            new RequestModel
+            {
+                Id = Guid.NewGuid(),
+                Name = "Проверить заголовки (HEAD)",
+                Method = "HEAD",
+                Url = "https://httpbin.org/headers",
+                Params = new List<KeyValuePairModel>(),
+                Headers = new List<KeyValuePairModel> {
+                    new KeyValuePairModel { Key = "Accept", Value = "application/json", IsEnabled = true }
+                },
+                BodyMode = "none",
+                FormData = new List<KeyValuePairModel>(),
+                UrlEncodedData = new List<KeyValuePairModel>(),
+                Body = ""
+            },
+            new RequestModel
+            {
+                Id = Guid.NewGuid(),
+                Name = "Удалить пользователя (DELETE)",
+                Method = "DELETE",
+                Url = "https://reqres.in/api/users/2",
+                Params = new List<KeyValuePairModel>(),
+                Headers = new List<KeyValuePairModel> {
+                    new KeyValuePairModel { Key = "Accept", Value = "application/json", IsEnabled = true }
+                },
+                BodyMode = "none",
+                FormData = new List<KeyValuePairModel>(),
+                UrlEncodedData = new List<KeyValuePairModel>(),
+                Body = ""
+            }
+        };
+
+        _activeRequestId = _requests[0].Id;
+    }
+}
